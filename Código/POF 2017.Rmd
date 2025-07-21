@@ -1,0 +1,218 @@
+---
+title: "POF 2017"
+author: "Almirêz Colombani Bispo de Almeida"
+date: "2025-07-15"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Puxar Bibliotecas
+```{r}
+#instalar a biblioteca se ainda não tem
+#install.packages("nome da biblioteca")
+
+
+library(tidyverse)#ggplot2 + dplyr
+
+```
+
+#Design
+```{r}
+
+cores_made <- c("#45ff66", "#eb52ff", "#3366ff","#feff41", "#fca64e" ) #adicionei o laranja porque estava faltando cor
+
+
+```
+
+#Puxar cardenetas já salvas em RDS(ver arquivo "save as rds")
+```{r}
+#Despesa Individual ()
+D_individual <- readRDS("./rds/DESPESA_INDIVIDUAL.rds")
+#Cardeneta Coletiva (o que diferencia cardeneta de despesa?)
+C_coletiva <- readRDS("./rds/CADERNETA_COLETIVA.rds")
+#Despesa Coletiva
+D_coletiva <- readRDS("./rds/DESPESA_COLETIVA.rds")
+#Alguel Estimado
+Aluguel_est <- readRDS("./rds/DESPESA_COLETIVA.rds")
+#Sobre Morador
+morador <- readRDS("./rds/MORADOR.rds")
+#Qualidade de Vida?
+
+#Consumo Alimentar?
+C_alimentar <- readRDS("./rds/CONSUMO_ALIMENTAR.rds")
+
+```
+
+#Empilhar cardenetas
+```{r}
+base_empilhada <- bind_rows(D_individual, D_coletiva, C_coletiva, Aluguel_est)
+
+#Somei as linhas das mesmas bases para verificar que a base empilhada só empilhou mesmo :)
+sum(nrow(D_individual), nrow(D_coletiva), nrow(C_coletiva), nrow(Aluguel_est))
+
+```
+#Tradutor (Tipo de Despesa)
+```{r}
+#Preparar base para tradutor
+#Lidar com NA´s para a quantidade de meses em que a despesa foi realizada
+base_empilhada <- base_empilhada |> mutate(V9011 = as.numeric(V9011)) |> mutate(V9011 = replace_na(V9011,1))
+#mas porque substitui NA´s por um mês ? Foi consumido pelo menos um mês, mas
+
+# LimitaR os códigos de produtos apenas para os 5 primeiros dígitos (V9001 é o tipo da despesa)
+# A razão pela qual se faz isso é que os dois últimos dígitos, na POF, denotam apenas variações nos nomes dos produtos
+#arroz polido, arroz hibrido, arroz liso,...
+base_empilhada <- base_empilhada |> mutate(V9001 = as.numeric(V9001)) |> mutate(V9001 = floor(V9001/100))
+#floor arredonda para baixo(número inteiro)
+
+#Preparar tradutor
+tradutor_despesa <- readxl::read_excel( "./Tradutores/Tradutor_Despesa_Geral.xls")
+
+#Recorte: apenas despesas monetárias
+D_monetaria <- base_empilhada
+
+tradutor_despesa <- tradutor_despesa |> select(Codigo, Descricao_2, Descricao_3)
+
+# Por que esse formato? c("Codigo", "Descricao_2", "Descricao_3")
+
+#
+# Mantendo somente uma observação por código, para evitar relação many-to-many
+tradutor_unico <- tradutor_despesa |> group_by(Codigo) |> filter(row_number(Descricao_3) == 1)
+
+#Junta tradutor com base, agora temos cada despesa com uma etiqueta de descrição 2 e 3 (tipo de consumo)
+#left_join é usado quando a base à esquerda vai manter todas as suas linhas durante a fusão
+D_monetaria <- D_monetaria |> left_join(tradutor_unico, by = c("V9001" = "Codigo"))
+
+#Agora temos uma base com as despesas (D_individual, D_coletiva, C_coletiva, Aluguel_est) e seus tipos
+nrow(D_monetaria)
+```
+
+#Consumo por família
+```{r}
+# V8000 é o valor da despesa X número de meses que essa despesa foi realizada X Fator de Anualização / 12
+#Fator de anualização (x reais por semana -> x reais por ano), depois divido por 12 para ter o mensal
+D_monetaria <- D_monetaria |>mutate(V8000_DEFLA = as.numeric(V8000_DEFLA),FATOR_ANUALIZACAO = as.numeric(FATOR_ANUALIZACAO))|> mutate(valor = V8000_DEFLA*V9011*FATOR_ANUALIZACAO/12)
+#Perdi 10mil observações ao filtrar Descricao_3 diferente de NA :(
+
+tipos <- unique(D_monetaria$Descricao_3)
+tipos
+
+# Tipos de Gastos (tipos)
+#Primeiro, agrupa por unidade de consumo
+D_monetaria <- D_monetaria |> group_by(COD_UPA, NUM_DOM, NUM_UC)|>
+#Então, soma os valores, por unidade de consumo, na categoria transporte (else e missing = 0) 
+  mutate(Transporte = sum(if_else(Descricao_3=="Transporte", valor, 0, missing = 0)),
+         Saude = sum(if_else(Descricao_3=="Assistencia a saude", valor, 0, missing = 0)),
+         Educacao = sum(if_else(Descricao_3=="Educacao", valor, 0, missing = 0)),
+         Alimentacao = sum(if_else(Descricao_3=="Alimentacao", valor, 0, missing = 0)),
+         Alimentacao = sum(if_else(Descricao_3=="Alimentacao", valor, 0, missing = 0)),
+         ) |>
+  ungroup()
+
+# Agora, iremos agrupar a base para juntar com a base de morador
+#Primeiro associei a cada gasto de um domicilio o gasto total por tipo
+#Agora vou agrupar essas linhas e montar uma linha por domicílio, com a média do valor gasto no domicílio (que é o próprio gasto do domicílio)
+despesas_agrupadas <- D_monetaria |> group_by(COD_UPA, NUM_DOM, NUM_UC) |> 
+  mutate(RENDA_TOTAL = as.numeric(RENDA_TOTAL)) |>                  
+  summarise(Transporte=mean(Transporte),
+            Saude=mean(Saude), Educacao=mean(Educacao), Alimentacao= mean(Alimentacao), Renda = mean(RENDA_TOTAL))
+
+
+```
+#Gasto Por Família com Pesos
+```{r}
+#Pegar base sobre os moradores
+# Colocar as colunas de despesas ao lado dos moradores
+morador <- morador |> left_join(despesas_agrupadas, by=c("COD_UPA", "NUM_DOM", "NUM_UC"))
+
+# Retirar empregados domésticos e parentes de empregados domésticos (V0306 indica a relação da pessoa de referência e o morador)
+morador <- morador |> filter(!V0306 %in% 18:19)
+
+# Dummy para pessoa de referência
+morador <- morador|> mutate(chefe = if_else(V0306==1, 1, 0))
+
+# Deixar apenas pessoa de referência (as estatísticas calculadas para o domicílio)
+base_final <- morador |> filter(chefe == 1)
+
+#Agora a base final também está apenas com uma linha por domicílio
+nrow(base_final) == nrow(despesas_agrupadas)
+
+#as.numeric
+base_final$PESO_FINAL <- as.numeric(base_final$PESO_FINAL)
+
+# Despesas Médias com Pesos
+educacao_media <- sum(base_final$Educacao*base_final$PESO_FINAL)/sum(base_final$PESO_FINAL)
+
+saude_media <- sum(base_final$Saude*base_final$PESO_FINAL)/sum(base_final$PESO_FINAL)
+
+transporte_media <- sum(base_final$Transporte*base_final$PESO_FINAL)/sum(base_final$PESO_FINAL)
+
+alimentacao_media <- sum(base_final$Alimentacao*base_final$PESO_FINAL)/sum(base_final$PESO_FINAL)
+
+```
+
+#Cálculo estatísticas descritivas com pesos
+```{r}
+library(hutils)# trabalhar com pesos
+# Decis (com renda monetária per capita, sem dedução de imposto)
+
+#as.numeric
+base_final$RENDA_TOTAL <- as.numeric(base_final$RENDA_TOTAL)
+
+#peguei a renda total porque assim dá para calcular a proporção do gasto em cada tipo dentro do domicílio 
+base_final <- base_final |> mutate(decis = weighted_ntile(RENDA_TOTAL, PESO_FINAL, 10))
+
+
+estat_POF <- base_final |> group_by(decis) |> 
+  summarise(
+    transporte_media = sum(Transporte*PESO_FINAL)/sum(PESO_FINAL),
+    saude_media = sum(Saude*PESO_FINAL)/sum(PESO_FINAL),
+    educacao_media = sum(Educacao*PESO_FINAL)/sum(PESO_FINAL),
+    alimentacao_media = sum(Alimentacao*PESO_FINAL)/sum(PESO_FINAL),
+    n = sum(PESO_FINAL)) #porque cada decil tem 10% :)
+            
+
+abobora <- base_final |> filter(decis == 1 )
+
+max(abobora$RENDA_TOTAL) 
+#Meus Decis estão diferentes da divisão do SIDRA, deveria me proucupar? Eles dividiram em 7 classes. 
+            
+
+```
+
+#Gráfico
+```{r}
+tabela <- base_final |> select(COD_UPA, NUM_DOM, NUM_UC, decis, Transporte, Educacao, Saude,Alimentacao, RENDA_TOTAL, PESO_FINAL) |> filter(RENDA_TOTAL > 0)|>
+                      #Pegar colunas de despesas criadas anteriormente e transformar em tipo e valor
+                      # pivot_longer é tipo a função smelt do pandas (python)
+                      pivot_longer(cols = c(Transporte, Educacao, Saude, Alimentacao),
+                                   names_to = "tipo_gasto",
+                                   values_to = "valor") |> mutate(prop = valor/ RENDA_TOTAL)
+                                               #calcular prop de cada tipo de gasto na renda total
+
+grafico <- tabela |> group_by(decis, tipo_gasto) |> summarise(
+              #média ponderada da proporção por decil
+               MpropF = sum(prop*PESO_FINAL)/sum(PESO_FINAL))
+  
+# Gráfico (peguei do repositório do made)
+plot <- ggplot(grafico, aes(fill = tipo_gasto, x = decis, y = MpropF)) + 
+  geom_bar(position = "stack", stat="identity") +
+  scale_fill_manual(values = cores_made, name = "Tipo de Gasto") +
+  ylab("Proporção (em %)") +
+  xlab("Decis") +
+  ggtitle("Composição da Despesa \n de Cada Decil de Renda") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks = seq(1, 10, 1))
+
+plot
+
+
+
+```
+
+
+
+
+
